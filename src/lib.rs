@@ -1,124 +1,154 @@
-use std::convert::TryInto;
-use luminance::texture::Dim2;
-use luminance::texture::Flat;
-use luminance::framebuffer::Framebuffer;
-use gl;
+//! [SDL2](https://crates.io/crates/sdl2) backend for [luminance](https://crates.io/crates/luminance)
+//! and [luminance-windowing](https://crates.io/crates/luminance-windowing).
+
+#![deny(missing_docs)]
+
 use luminance::context::GraphicsContext;
-use luminance::state::GraphicsState;
-pub use luminance::state::StateQueryError;
-pub use luminance_windowing::{CursorMode, Surface, WindowDim, WindowOpt};
-use std::cell::RefCell;
+use luminance::framebuffer::Framebuffer;
+use luminance::framebuffer::FramebufferError;
+use luminance::texture::Dim2;
+pub use luminance_gl::gl33::StateQueryError;
+use luminance_gl::GL33;
+pub use sdl2;
 use std::fmt;
 use std::os::raw::c_void;
-use std::rc::Rc;
-use std::ffi::CString;
-use std::ops::DerefMut;
 
-#[macro_use] extern crate log;
-
-//Error that can be risen while creating a surface
+/// Error that can be risen while creating a surface.
+#[non_exhaustive]
 #[derive(Debug)]
-pub enum SDL2SurfaceError {
-    GraphicsStateError(StateQueryError)
+pub enum Sdl2SurfaceError {
+  /// Initialization of the surface went wrong.
+  InitError(String),
+  /// Window creation failed.
+  WindowCreationFailed(sdl2::video::WindowBuildError),
+  /// Failed to create an OpenGL context.
+  GlContextInitFailed(String),
+  /// No available video mode.
+  VideoInitError(String),
+  /// The graphics state is not available.
+  ///
+  /// This error is generated when the initialization code is called on a thread on which the
+  /// graphics state has already been acquired.
+  GraphicsStateError(StateQueryError),
 }
 
-impl fmt::Display for SDL2SurfaceError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        match self {
-            SDL2SurfaceError::GraphicsStateError(sqe) => write!(f, "Failed to get graphics state: {}", sqe)
-        }
+impl fmt::Display for Sdl2SurfaceError {
+  fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+    match *self {
+      Sdl2SurfaceError::InitError(ref e) => write!(f, "initialization error: {}", e),
+      Sdl2SurfaceError::WindowCreationFailed(ref e) => write!(f, "failed to create window: {}", e),
+      Sdl2SurfaceError::GlContextInitFailed(ref e) => {
+        write!(f, "failed to create OpenGL context: {}", e)
+      }
+      Sdl2SurfaceError::VideoInitError(ref e) => {
+        write!(f, "failed to initialize video system: {}", e)
+      }
+      Sdl2SurfaceError::GraphicsStateError(ref e) => {
+        write!(f, "failed to get graphics state: {}", e)
+      }
     }
+  }
 }
 
-pub struct SDL2Surface {
-    pub sdl: sdl2::Sdl,
-    pub video: sdl2::VideoSubsystem,
-    pub window: sdl2::video::Window,
-    pub gfx_state: Rc<RefCell<GraphicsState>>,
+/// A [luminance] GraphicsContext backed by SDL2 and OpenGL 3.3 Core.
+///
+/// ```ignore
+/// use luminance_sdl2::GL33Surface;
+///
+/// let surface = GL33Surface::build_with(|video| video.window("My app", 800, 600))
+///     .expect("failed to create surface");
+///
+/// let sdl = surface.sdl();
+/// ```
+///
+/// [luminance]: https://crates.io/crates/luminance
+pub struct GL33Surface {
+  sdl: sdl2::Sdl,
+  window: sdl2::video::Window,
+  gl: GL33,
+  // This struct needs to stay alive until we are done with OpenGL stuff.
+  _gl_context: sdl2::video::GLContext,
 }
 
-unsafe impl GraphicsContext for SDL2Surface {
-    fn state(&self) -> &Rc<RefCell<GraphicsState>> {
-        &self.gfx_state
-    }
+impl GL33Surface {
+  /// Create a new [`GL33Surface`] from a [`sdl2::video::WindowBuilder`].
+  ///
+  /// The callback is passed a reference to [`sdl2::VideoSubsystem`].
+  /// This is your chance to change GL attributes before creating the window with your preferred
+  /// settings.
+  ///
+  /// ```ignore
+  /// use luminance_sdl2::GL33Surface;
+  ///
+  /// let surface = GL33Surface::build_with(|video| {
+  ///     let gl_attr = video.gl_attr();
+  ///     gl_attr.set_multisample_buffers(1);
+  ///     gl_attr.set_multisample_samples(4);
+  ///
+  ///     let mut builder = video.window("My app", 800, 600);
+  ///     builder.fullscreen_desktop();
+  ///     builder
+  /// })
+  ///   .expect("failed to build window");
+  /// ```
+  pub fn build_with<WB>(window_builder: WB) -> Result<Self, Sdl2SurfaceError>
+  where
+    WB: FnOnce(&sdl2::VideoSubsystem) -> sdl2::video::WindowBuilder,
+  {
+    let sdl = sdl2::init().map_err(Sdl2SurfaceError::InitError)?;
+
+    let video_system = sdl.video().map_err(Sdl2SurfaceError::VideoInitError)?;
+
+    let gl_attr = video_system.gl_attr();
+
+    gl_attr.set_context_profile(sdl2::video::GLProfile::Core);
+    gl_attr.set_context_flags().forward_compatible().set();
+    gl_attr.set_context_major_version(3);
+    gl_attr.set_context_minor_version(3);
+
+    let window = window_builder(&video_system)
+      .opengl()
+      .build()
+      .map_err(Sdl2SurfaceError::WindowCreationFailed)?;
+
+    let _gl_context = window
+      .gl_create_context()
+      .map_err(Sdl2SurfaceError::GlContextInitFailed)?;
+
+    gl::load_with(|s| video_system.gl_get_proc_address(s) as *const c_void);
+
+    let gl = GL33::new().map_err(Sdl2SurfaceError::GraphicsStateError)?;
+    let surface = GL33Surface {
+      sdl,
+      window,
+      gl,
+      _gl_context,
+    };
+
+    Ok(surface)
+  }
+
+  /// The entry point to most of the SDL2 API.
+  pub fn sdl(&self) -> &sdl2::Sdl {
+    &self.sdl
+  }
+
+  /// The underlying SDL2 window of this surface.
+  pub fn window(&self) -> &sdl2::video::Window {
+    &self.window
+  }
+
+  /// Get the back buffer.
+  pub fn back_buffer(&mut self) -> Result<Framebuffer<GL33, Dim2, (), ()>, FramebufferError> {
+    let (w, h) = self.window.drawable_size();
+    Framebuffer::back_buffer(self, [w, h])
+  }
 }
 
-//TODO: Implement better error checking using error enum above (e.g. notify user that sdl2.dll is missing)
-//TODO: Perhaps implement wrappers for a bunch of window-related functions?
-impl SDL2Surface {
-    pub fn new(gl_version: (u8, u8), window_title: &str, window_size: (u32, u32), vsync: bool) -> Result<Self, SDL2SurfaceError> {
-        debug!("Initializing sdl...");
-        let sdl = sdl2::init().expect("Failed to load SDL!");
-        let video = sdl.video().expect("Failed to load video subsystem!");
-        debug!("sdl initialized!");
+unsafe impl GraphicsContext for GL33Surface {
+  type Backend = GL33;
 
-        debug!("Opening a window...");
-        let window = video.window(window_title, window_size.0, window_size.1)
-                        .position_centered()
-                        .opengl() //TODO: Set opengl version somehow
-                        .build()
-                        .map_err(|e| e.to_string()).expect("Failed to open window!");
-        debug!("Window opened!");
-
-        {
-            let gl_attr = video.gl_attr();
-            gl_attr.set_context_profile(sdl2::video::GLProfile::Core);
-            gl_attr.set_context_version(gl_version.0, gl_version.1);
-            if vsync {
-                gl_attr.set_double_buffer(true);
-            } else {
-                gl_attr.set_double_buffer(false);
-            }
-        }
-
-        let _gl_context = window.gl_create_context().expect("Failed to create GL context!");
-        gl::load_with(|s| video.gl_get_proc_address(s) as *const c_void);
-
-        let swap_interval = if vsync {
-            sdl2::video::SwapInterval::VSync
-        } else {
-            sdl2::video::SwapInterval::Immediate
-        };
-
-        video.gl_set_swap_interval(swap_interval).expect("Failed to set swap interval!");
-
-        let gfx_state = GraphicsState::new().map_err(SDL2SurfaceError::GraphicsStateError)?;
-        let surface = Self {
-            sdl: sdl,
-            video: video,
-            window: window,
-            gfx_state: Rc::new(RefCell::new(gfx_state)),
-        };
-
-        Ok(surface)
-    }
-
-    pub fn size(&self) -> (u32, u32) {
-        self.window.drawable_size()
-    }
-
-    pub fn size_array(&self) -> [u32; 2] {
-        let size = self.size();
-        [size.0.try_into().expect("Failed to turn size into i32"), size.1.try_into().expect("Failed to turn size into i32")]
-    }
-
-    pub fn width(&self) -> u32 {
-        self.window.drawable_size().0
-    }
-
-    pub fn height(&self) -> u32 {
-        self.window.drawable_size().1
-    }
-
-    pub fn back_buffer(&mut self) -> Result<Framebuffer<Flat, Dim2, (), ()>, SDL2SurfaceError> {
-        Ok(Framebuffer::back_buffer(self, self.size_array()))
-    }
-
-    pub fn swap_buffer(&self) {
-        self.window.gl_swap_window();
-    }
-
-    pub fn set_title(&mut self, title: &str) {
-        self.window.set_title(title); //TODO: Return the error?
-    }
+  fn backend(&mut self) -> &mut Self::Backend {
+    &mut self.gl
+  }
 }
