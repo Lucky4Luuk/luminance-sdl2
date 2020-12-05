@@ -1,22 +1,29 @@
 [package]
 name = "luminance-sdl2"
-version = "0.1.0"
-authors = ["Luuk van Oijen <lazyluuk.channel@gmail.com>"]
+version = "0.2.1"
+license = "BSD-3-Clause"
+authors = [
+  "Dimitri Sabadie <dimitri.sabadie@gmail.com>",
+  "Joel Nordström <e.joel.nordstrom@gmail.com>"
+]
+description = "SDL2 support for luminance"
+keywords = ["stateless", "type-safe", "graphics", "luminance", "sdl"]
+categories = ["rendering::graphics-api"]
+homepage = "https://github.com/phaazon/luminance-rs"
+repository = "https://github.com/phaazon/luminance-rs"
+documentation = "https://docs.rs/luminance-sdl2"
+readme = "README.md"
 edition = "2018"
-license = "..."
-description = "TBD"
-homepage = "TBD"
-documentation = "TBD"
-repository = "TBD"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[badges]
+maintenance = { status = "actively-developed" }
+
+[features]
+default = ["bundled"]
+bundled = ["sdl2/bundled"]
 
 [dependencies]
 gl = "0.14"
-# beryllium = "0.2.1"
+luminance = ">=0.42, <0.44"
+luminance-gl = ">=0.15, <0.17"
 sdl2 = "0.33"
-# luminance = "0.38"
-luminance = "0.43.1"
-# luminance-windowing = "0.8"
-luminance-windowing = { git = "https://github.com/Lucky4Luuk/luminance-rs" }
-log = "0.4"
